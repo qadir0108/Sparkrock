@@ -60,3 +60,18 @@ cp .env.example .env            # set MSSQL_SA_PASSWORD; add API_PORT=8088 if 80
 docker compose up -d --build    # sqlserver -> db-init -> api on http://localhost:8080
 dotnet test                     # no database needed
 ```
+
+## 4. DevOps
+
+**Azure dev environment** (subscription "subscription" (pay-as-you-go), region `canadacentral`, resource group `sparkrock-rg`): registry `acrsparkrockattend7898`, Azure SQL server `sql-sparkrock-attendance-7898` with database `Attendance` (Basic, 5 DTU), and Container App `ca-attendance-api` in environment `cae-sparkrock-attendance-dev` (scales to zero, external ingress on port 8080, `ASPNETCORE_ENVIRONMENT=Development` so Swagger is on). Status: deployed 2026-11-03 from commit `8066480` at `https://ca-attendance-api.niceglacier-aa8a854f.canadacentral.azurecontainerapps.io` (Swagger at `/swagger`); health, Swagger and the three endpoints were verified live. Ingress is restricted to the deploying host's IP by rule `allow-deploy-host`; change it with `az containerapp ingress access-restriction set -n ca-attendance-api -g sparkrock-rg --rule-name allow-deploy-host --ip-address <ip>/32 --action Allow`, or remove it with `az containerapp ingress access-restriction remove -n ca-attendance-api -g sparkrock-rg --rule-name allow-deploy-host`.
+
+**Deploy or redeploy:** `az login`, then `bash deploy/azure/deploy.sh` (Git Bash with Docker running). It is idempotent. It clones `main` from GitHub, builds the `final` image in ACR, loads the schema with `deploy/azure/init-azure-sql.sh`, updates the app and smoke-tests `/health`, Swagger and the three endpoints. The SQL admin password is never printed. To reset it, run `az sql server update -g sparkrock-rg -n sql-sparkrock-attendance-7898 --admin-password <new>` and then rerun with `SQL_ADMIN_PASSWORD` exported.
+
+**Pipeline:** `azure-pipelines.yml` builds and tests on PRs to `main`. On pushes to `main`, it pushes the image to the ACR and deploys it to the Container App. To connect it, create these in an Azure DevOps project:
+1. A GitHub service connection (GitHub App), then create the pipeline from `qadir0108/Sparkrock`.
+2. An Azure Resource Manager service connection `sc-sparkrock-attendance-dev`, scoped to the resource group.
+3. An environment `sparkrock-attendance-dev`.
+
+**Security (finding H1):** the API has no authentication, so anyone who can reach the URL can read and write attendance. The database holds only sample data. `deploy.sh` restricts ingress to the deploying host's IP after the smoke tests pass. Keep that restriction, or switch to internal ingress, until authentication lands.
+
+**Teardown:** `az group delete --name sparkrock-rg --yes --no-wait`. At idle the environment costs about USD 10 a month (ACR Basic about USD 5, SQL Basic about USD 5, Container Apps about 0 at zero replicas, plus small Log Analytics ingestion).
