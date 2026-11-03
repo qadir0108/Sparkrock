@@ -1,0 +1,149 @@
+# Attendance API: build and test on every PR and push to main; on main also push the image to ACR
+# and roll it out to the dev Container App created by deploy/azure/deploy.sh.
+#
+# Source: create this pipeline from the GitHub repository qadir0108/Sparkrock using a GitHub
+# service connection (GitHub App). That makes the GitHub repo the pipeline's `self`, so the
+# trigger and pr blocks below apply to it and PR builds check out the PR head.
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  NUGET_PACKAGES: $(Pipeline.Workspace)/.nuget/packages
+  buildConfiguration: Release
+  # Placeholders: replace with the names you give these when you create them.
+  azureServiceConnection: sc-sparkrock-attendance-dev      # Azure Resource Manager, scoped to the resource group
+  resourceGroup: sparkrock-rg
+  acrName: acrsparkrockattend7898                         # name deploy.sh derives for this subscription
+  containerAppName: ca-attendance-api
+  imageRepository: attendance-api
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Build
+    displayName: Build and test
+    jobs:
+      - job: BuildTest
+        displayName: Build and test
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: Install .NET SDK 8.0.x
+            inputs:
+              packageType: sdk
+              version: 8.0.x
+
+          - task: Cache@2
+            displayName: Cache NuGet packages
+            inputs:
+              key: 'nuget | "$(Agent.OS)" | **/*.csproj | Attendance.sln'
+              restoreKeys: |
+                nuget | "$(Agent.OS)"
+              path: $(NUGET_PACKAGES)
+
+          - task: DotNetCoreCLI@2
+            displayName: Restore
+            inputs:
+              command: restore
+              projects: Attendance.sln
+
+          - task: DotNetCoreCLI@2
+            displayName: Build
+            inputs:
+              command: build
+              projects: Attendance.sln
+              arguments: --no-restore -c $(buildConfiguration)
+
+          - task: DotNetCoreCLI@2
+            displayName: Test
+            inputs:
+              command: test
+              projects: Attendance.sln
+              publishTestResults: false
+              arguments: >-
+                --no-build -c $(buildConfiguration)
+                --logger trx
+                --results-directory $(Agent.TempDirectory)/TestResults
+                --collect:"XPlat Code Coverage"
+
+          - task: PublishTestResults@2
+            displayName: Publish test results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: '**/*.trx'
+              searchFolder: $(Agent.TempDirectory)/TestResults
+              failTaskOnFailedTests: true
+
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish code coverage
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(Agent.TempDirectory)/TestResults/**/coverage.cobertura.xml
+
+  # Image build runs on pushes to main only, so PR builds never need registry access.
+  - stage: Container
+    displayName: Build and push image
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - job: Push
+        displayName: Build and push to ACR
+        steps:
+          - checkout: self
+          # AzureCLI@2 with the ARM connection instead of Docker@2: one service connection covers
+          # both push and deploy, and it does not depend on ACR Tasks being enabled.
+          - task: AzureCLI@2
+            displayName: docker build --target final and push
+            inputs:
+              azureSubscription: ${{ variables.azureServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az acr login --name "$(acrName)"
+                server="$(az acr show --name "$(acrName)" --query loginServer -o tsv)"
+                repo="$server/$(imageRepository)"
+                docker build --target final \
+                  -t "$repo:$(Build.SourceVersion)" -t "$repo:$(Build.BuildId)" -t "$repo:latest" .
+                docker push "$repo:$(Build.SourceVersion)"
+                docker push "$repo:$(Build.BuildId)"
+                if [ "$(isMain)" = "True" ]; then docker push "$repo:latest"; fi
+
+  - stage: DeployDev
+    displayName: Deploy to dev
+    dependsOn: Container
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: DeployContainerApp
+        displayName: Update dev Container App
+        environment: sparkrock-attendance-dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+                # Changes only the image; secrets, env vars, ingress and identity set by
+                # deploy/azure/deploy.sh are kept.
+                - task: AzureContainerApps@1
+                  displayName: Deploy image $(Build.SourceVersion)
+                  inputs:
+                    azureSubscription: ${{ variables.azureServiceConnection }}
+                    resourceGroup: $(resourceGroup)
+                    containerAppName: $(containerAppName)
+                    imageToDeploy: $(acrName).azurecr.io/$(imageRepository):$(Build.SourceVersion)

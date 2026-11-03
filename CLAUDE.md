@@ -48,4 +48,4 @@ docker build --target test .       # opt-in: run tests inside the image build
 
 ## Agents
 
-`.claude/agents/` defines three roles used throughout this project: `legacy` (read-only explorer of the VB6 code and SQL), `api-engineer` (builds and verifies the API and Docker stack), `api-reviewer` (read-only ranked review; hand its findings to `api-engineer` to fix). Keep that split: neither reviewer nor legacy agent edits files.
+`.claude/agents/` defines four roles used throughout this project: `legacy` (read-only explorer of the VB6 code and SQL), `api-engineer` (builds and verifies the API and Docker stack), `api-reviewer` (read-only ranked review; hand its findings to `api-engineer` to fix), `azure-devops` (Azure Pipelines, Boards and az CLI automation; never edits app code or Docker files). Keep that split: neither reviewer nor legacy agent edits files.
