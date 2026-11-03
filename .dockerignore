@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.git/
+.vs/
+**/.vscode/
+**/*.user
+.env
+.claude/
+AttendanceSystem/
+db/
+*.md
